@@ -9,7 +9,6 @@ locations = [(121,123), (128,130), (38,40), (124,126), (26, 28), (634, 636), (82
 data = pd.read_fwf(NAME_FILE, locations, names=col_names)
 data = data.replace(-1, np.nan)
 
-
 def delete_minus_one(df, name_column):
 
     df = df[df[name_column] != -1]
