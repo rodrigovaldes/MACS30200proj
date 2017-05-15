@@ -1,0 +1,299 @@
+---
+title: "PS3 Perspectives for Computational Research"
+author: "Rodrigo Valdes"
+date: "May 14, 2017"
+output:
+    github_document:
+      toc: true
+---
+
+```{r setup, echo = FALSE, message = FALSE, warning = FALSE, cache = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, echo = FALSE)
+
+setwd('/Users/ruy/Documents/UChicago/spring2017/perspectives_research/github/MACS30200proj/ProblemSets/PS3')
+
+library(tidyverse)
+library(purrr)
+library(lmtest)
+library(car)
+library(MVN)
+library(Amelia)
+library(broom)
+library(forcats)
+theme_set(theme_minimal())
+biden_dat <- read_csv("biden.csv") %>%
+  mutate(obs_num = as.numeric(rownames(.)))
+
+biden_omit <- biden_dat %>%
+  na.omit()
+```
+
+```{r}
+(lm_init_biden <- biden_omit %>%
+    lm(biden ~ age + female + educ, data = .))
+
+tidy(lm_init_biden)
+```
+
+
+# 1. Regression diagnostics
+
+## 1.1 Identify any unusual and/or influential observations
+
+```{r}
+infl_bar <- 4 / (nrow(biden_omit) - length(coef(lm_init_biden)) - 1 -1)
+
+biden_nostics <- biden_omit %>%
+  mutate(lev_hat = hatvalues(lm_init_biden),
+         discrep_student = rstudent(lm_init_biden),
+         infl_cook = cooks.distance(lm_init_biden))
+
+all_weird <- biden_nostics %>%
+  filter(lev_hat >= 2 * mean(lev_hat) | 
+           abs(discrep_student) > 2 | 
+           infl_cook > infl_bar) %>%
+  mutate(high_cooks = ifelse(infl_cook > infl_bar, "high_cooks", "otherwise"))
+
+# Bubble Plot
+ggplot(all_weird, aes(lev_hat, discrep_student)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_point(aes(size = infl_cook, color = high_cooks), shape = 1) +
+  scale_size_continuous(range = c(1, 20)) +
+  geom_vline(xintercept = 2 * mean(biden_nostics$lev_hat), color = "red", linetype = "dashed") + 
+  geom_hline(yintercept = 2, color = "red", linetype = "dashed") + 
+  geom_hline(yintercept = -2, color = "red", linetype = "dashed") + 
+  labs(title = "Potential unusual/influential observations",
+       subtitle = paste(sprintf("All Observations (%i) with High Leverage, Discrepancy, or Influence\n", 
+                                nrow(all_weird)),
+                        "Blue Indicates High Cooks D (Influence)"),
+       x = "Leverage",
+       y = "Studentized residual") +
+  scale_color_manual(values = c("high_cooks" = "blue", "otherwise" = "black")) + 
+  theme(legend.position = "none")
+```
+
+
+According to the bubble plot, some observations can potentially affect the results. The most worrying ones are those in blue and with a high diameter, those with high Cook's D. From those, it is worthwhile to analyze closer how those are affecting the size of the coefficients of the model. 
+
+I will graph some of the characteristics of the complete dataset and those identifies as "weird."
+
+```{r}
+biden_nostics <- biden_nostics %>%
+  mutate(`Unusual or Influential` = ifelse(obs_num %in% all_weird$obs_num, "Yes", "No"))
+
+biden_nostics %>% 
+  ggplot(aes(biden, fill = `Unusual or Influential`)) +
+    geom_histogram(bins = 10) + 
+    labs(title = "Biden Warmth Score",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Score",
+         y = "Count")
+
+biden_nostics %>% 
+  mutate(party = ifelse(dem == 1, "Democrat", 
+                        ifelse(rep == 1, "Republican",
+                               "Independent"))) %>%
+  ggplot(aes(party, fill = `Unusual or Influential`)) +
+    geom_histogram(stat = "count", bins = 10) + 
+    labs(title = "Party Affiliation",
+         subtitle = "All Observations with High Leverage, Discrepancy, or Influence",
+         x = "Party",
+         y = "Count")
+```
+
+As depicted by the graph of the Biden Warmth Score, some of the potential influential observations are in the extreme of the distribution. That is to say, with a score very close to zero or a hundred. Furthermore, the graph by party affiliation shows that Republican are overrepresented in the "weird" observations. Then, maybe those individuals look weird just because those are in a group of mainly Democrats. I will work cautiously before deleting those. 
+
+The model does not control by party affiliation, and that the graphs depict possible bias by party affiliation. The first step to deal with this unusual observations is to add party affiliation as a control. Afterwards, I will run a new analysis to look for unusual or influential observations. If those still exist, I will try with interactions between party affiliation and age, or party affiliation and gender. 
+
+## 1.2 Test for non-normality of errors
+
+```{r}
+car::qqPlot(lm_init_biden, main = "Normal Quantile Plot for Studentized Residuals of Initial Linear Model",
+            ylab = "Studentized Residuals")
+```
+```{r}
+augment(lm_init_biden, biden_omit) %>%
+  mutate(.student = rstudent(lm_init_biden)) %>%
+  ggplot(aes(.student)) +
+  geom_density(adjust = .5) +
+  labs(x = "Studentized residuals",
+       y = "Estimated density")
+```
+
+The two graphs above show that the distribution of the residuals is not normal. The residuals are positively skewed. There are many possible ways to improve residual’s normality, like a monotonic transformation of the dependent and independent variables. However, in this case, given that there are dummy variables, I suggest transforming the warmth score. 
+
+I present an example of a transformation that can improve the distribution of the errors slightly below. I exponentiate Biden warmth by 1.5. Although this is better that the original one, it is possible to improve it further. The new density plot shows that the errors are closer to normal.
+
+```{r}
+temp_biden <- biden_omit %>%
+  mutate(biden_power =  biden ^ 1.5)
+
+(biden_lm_power <- temp_biden %>%
+    lm(biden_power ~ age + female + educ, data = .))
+  
+car::qqPlot(biden_lm_power, main = sprintf("Model with 1.5 Exponentiated Values for Biden Warmth Score"), ylab = "Studentized Residuals")
+
+augment(biden_lm_power, temp_biden) %>%
+  mutate(.student = rstudent(biden_lm_power)) %>%
+  ggplot(aes(.student)) +
+  geom_density(adjust = .5) +
+  labs(x = "Studentized residuals",
+       y = "Estimated density")
+
+```
+
+## 1.3 Test for non-normality of errors
+
+```{r}
+bptest(lm_init_biden)
+```
+
+The small p-value of the Breusch-Pagan test indicates that heteroscedasticity can not be rejected. Then, the standard errors of the coefficients are not useful for inference. That is to say, variables that are significant maybe should not be; and insignificant variables might be significant. 
+
+## 1.4 Multicollinearity
+
+```{r}
+car::vif(lm_init_biden)
+```
+
+The Variance Inflation Factors are below 10. As a result, we do not need to worry about multicollinearity.
+
+# 2. Interaction Terms
+
+```{r}
+(lm_inter_biden <- biden_omit %>%
+  lm(biden ~ age + educ + age * educ, data = .))
+```
+
+## 2.1 Evaluate the marginal effect of age on Joe Biden thermometer rating, conditional on education. 
+
+The marginal effect of age depends on the value of education. The equation for the marginal effect of age is the following:
+
+$$\frac{\delta E(biden)}{\delta age} = \beta_{1} + \beta_{3}educ$$
+
+Now, considering the values of the regression,
+
+$$\frac{\delta E(biden)}{\delta age} = 0.67187 + -0.04803educ$$
+
+This means that the relationship between the warmth value and age is not linear. In fact, for ages above 13.98855, the marginal effect is negative (all the individuals in the dataset are above 17). Meanwhile, the maximum conditional effect is when education is equal to zero, and it decreases as education increases.
+
+Finally, the relationship is significant given the results of the hypothesis test depicted below.
+
+```{r other_marg_effect_sig}
+linearHypothesis(lm_inter_biden, "age + age:educ")
+```
+
+## 2.2 Evaluate the marginal effect of education on Joe Biden thermometer rating, conditional on age. 
+
+Similar to the former case, the marginal effect of education is:
+
+$$\frac{\delta E(biden)}{\delta educ} = \beta_{2} + \beta_{2}age$$
+
+With the values of the regression,
+
+$$\frac{\delta E(biden)}{\delta educ} = 1.65743 + -0.04803age$$
+
+The greatest marginal effect of eucation is when age is zero. Altought the minimum value for age in this dataset is eighteen. After that, the effect decreases while age increases. The relationship becomes negative above 34.53 years of education. However, it never happens in the dataset, where the maximum value for education is seventeen. 
+
+Finally, the relationship is significant as suggested by the significant test.
+
+```{r marg_effect_sig}
+linearHypothesis(lm_inter_biden, "educ + age:educ")
+```
+
+# 3. Missing Data
+
+Before imputing values, I will try to analyze a way to transform the existing data to be closer to a multivariate normal. 
+
+According to the Henze-Zirkler's Normality test, the data is not distributed multivariate normal. Furthermore, the variables by themselves are not distributed normally, as showed in the Shapiro-Wilk's test.
+
+```{r}
+preds <- biden_dat %>%
+  select(biden, age, educ, female, dem, rep)
+
+hzTest(preds %>%
+         select(-c(biden, female, dem, rep)))
+
+uniNorm(preds %>% 
+          na.omit() %>%
+          select(-c(biden, female, dem, rep)), type = "SW", desc = FALSE)
+```
+One of the partial solutions is to convert age and education to its square root values. The new Henze-Zirkler's Normality test shows that the data with transformations (the square root values for age and education) decreases the statistic of the test from about 22 to about 15. However, the sample is still not distributed as a multivariate normal, but it is better that the original data.
+
+```{r}
+biden_omit <- biden_omit %>%
+  mutate(sqrt_educ = sqrt(educ),
+         sqrt_age = sqrt(age))
+
+print("Sqrt age and educ")
+hzTest(biden_omit %>%
+         select(sqrt_educ, sqrt_age))
+
+uniNorm(biden_omit %>%
+          select(sqrt_educ, sqrt_age), type = "SW", desc = FALSE)
+```
+
+Finally, I run the regression with the transformations in the variables and imputing missing values.
+
+```{r}
+biden_puted <- amelia(preds, 
+                      sqrts = c("age", "educ"),
+                      noms = c("female", "dem", "rep"), p2s = 0)
+
+models_puted <- data_frame(data = biden_puted$imputations) %>%
+  mutate(model = map(data, ~ lm(biden ~ age +
+                                  educ + female,
+                                data = .x)),
+         coef = map(model, broom::tidy)) %>%
+  unnest(coef, .id = "id")
+
+mi.meld.plus <- function(df_tidy){
+  # transform data into appropriate matrix shape
+  coef.out <- df_tidy %>%
+    select(id:estimate) %>%
+    spread(term, estimate) %>%
+    select(-id)
+  
+  se.out <- df_tidy %>%
+    select(id, term, std.error) %>%
+    spread(term, std.error) %>%
+    select(-id)
+  
+  combined.results <- mi.meld(q = coef.out, se = se.out)
+  
+  data_frame(term = colnames(combined.results$q.mi),
+             estimate.mi = combined.results$q.mi[1, ],
+             std.error.mi = combined.results$se.mi[1, ])
+}
+
+
+to_plot <- bind_rows(orig = tidy(lm_init_biden),
+          mult_imp = mi.meld.plus(models_puted) %>%
+            rename(estimate = estimate.mi,
+                   std.error = std.error.mi),
+          .id = "method") %>%
+  mutate(method = factor(method, levels = c("orig", "mult_imp"),
+                         labels = c("Listwise deletion", "Multiple imputation")),
+         term = factor(term, levels = c("(Intercept)", "age",
+                                        "female", "educ"),
+                       labels = c("Intercept", "Age", "Female",
+                                  "Educ"))) %>%
+  filter(term != "Intercept")
+  
+to_plot %>%
+  ggplot(aes(fct_rev(term), estimate, color = fct_rev(method),
+             ymin = estimate - 1.96 * std.error,
+             ymax = estimate + 1.96 * std.error)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_pointrange(position = position_dodge(.75)) +
+  coord_flip() +
+  scale_color_discrete(guide = guide_legend(reverse = TRUE)) +
+  labs(title = "Comparing regression results",
+       subtitle = "Omitting intercept from plot",
+       x = NULL,
+       y = "Estimated parameter",
+       color = NULL) +
+  theme(legend.position = "bottom")
+```
+
+The coefficients of the relevant variables are still in the same boundaries. That is to say, their confidence intervals are overlapped, and it is not possible to reject that those are statistically similar. 
