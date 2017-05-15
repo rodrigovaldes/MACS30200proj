@@ -2,9 +2,7 @@
 title: "PS3 Perspectives for Computational Research"
 author: "Rodrigo Valdes"
 date: "May 14, 2017"
-output:
-    github_document:
-      toc: true
+output: html_document
 ---
 
 ```{r setup, echo = FALSE, message = FALSE, warning = FALSE, cache = FALSE}
